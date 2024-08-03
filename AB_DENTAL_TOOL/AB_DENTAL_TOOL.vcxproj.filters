@@ -18,12 +18,18 @@
     <ClCompile Include="AB_DENTAL_TOOL.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="vtk_visuals.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="rang.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="OCR_font_STL.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="vtk_visuals.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
