@@ -11,7 +11,7 @@
 #include <regex>
 #include <map>
 #include <windows.h>
-#include "rang.hpp"
+#include <rang.hpp>
 #include "OCR_font_STL.h"
 
 //#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
@@ -77,6 +77,8 @@
 #include <vtkFreeTypeTools.h>
 #include <vtkImageCanvasSource2D.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkPointPicker.h>
+#include <vtkCellPicker.h>
 
 #include <vtkWin32OpenGLRenderWindow.h>
 #include <vtkSplineWidget.h>
@@ -90,7 +92,7 @@
 #include <vtkNamedColors.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCameraOrientationWidget.h>
-
+#include <vtkSphereSource.h>
 #include <vtkDoubleArray.h>
 #include <vtkCameraOrientationRepresentation.h>
 #include <vtkPolyDataConnectivityFilter.h>
@@ -122,20 +124,31 @@
 
 
 #define M_PI 3.14159265358979323846
+#define Min(a,b)            (((a) < (b)) ? (a) : (b))
+#define Max(a,b)            (((a) > (b)) ? (a) : (b))
 
-//<< Red << << ColorEnd <<
-auto ColorEnd = [](std::ostream& os) -> std::ostream& { return os << rang::fg::reset; };
-auto Red = [](std::ostream& os) -> std::ostream& { return os << rang::fg::red; };
-auto Green = [](std::ostream& os) -> std::ostream& { return os << rang::fg::green; };
-auto Yellow = [](std::ostream& os) -> std::ostream& { return os << rang::fg::yellow; };
-auto Blue = [](std::ostream& os) -> std::ostream& { return os << rang::fg::blue; };
-auto Magenta = [](std::ostream& os) -> std::ostream& { return os << rang::fg::magenta; };
-auto Cyan = [](std::ostream& os) -> std::ostream& { return os << rang::fg::cyan; };
-auto Gray = [](std::ostream& os) -> std::ostream& { return os << rang::fg::gray; };
+//vtkMath::RadiansFromDegrees()
+#define deg2rad(degrees)  degrees * M_PI / 180.0 
+
 
 bool DEBUG = true;
-namespace fs = std::filesystem;
+using namespace std;
+using namespace filesystem;
+using namespace rang;
 namespace PMP = CGAL::Polygon_mesh_processing;
+
+//<< RED << << END <<
+#define END		fg::reset
+#define RED		fg::red	
+#define GREEN	fg::green	
+#define YELLOW	fg::yellow
+#define BLUE	fg::blue	
+#define MAGENTA fg::magenta
+#define CYAN	fg::cyan	
+#define GRAY	fg::gray	
+#define BOLD	style::bold
+#define NORM	style::reset
+
 
 //typedef CGAL::Simple_cartesian<double>							Cgal_Kernel;
 //typedef CGAL::Exact_predicates_exact_constructions_kernel		Cgal_Kernel;
@@ -153,8 +166,12 @@ typedef Cgal_Mesh::Halfedge_index								Cgal_Halfedge;
 typedef Cgal_Mesh::Face_index									Cgal_Face;
 typedef boost::graph_traits<Cgal_Mesh>::face_descriptor			Cgal_face_descriptor;
 
-VTK_MODULE_INIT(vtkRenderingOpenGL2);
+#ifdef _MSC_VER
+/* The below is MANDATORY for Windows builds or you will take an exception in vtkRenderer::SetRenderWindow(vtkRenderWindow *renwin) */
+#include <vtkAutoInit.h>
+VTK_MODULE_INIT(vtkRenderingOpenGL2); /* VTK was built with vtkRenderingOpenGL2 */
 VTK_MODULE_INIT(vtkInteractionStyle);
+#endif
 class C_InteractorStyle;
 
 vtkNew<vtkActor> staticActor;
@@ -171,8 +188,8 @@ struct PTSPoint {
 	double x, y, z, u, v, w;
 };
 
-bool isXYZLine(const std::string& line) {
-	std::istringstream iss(line);
+bool isXYZLine(const string& line) {
+	istringstream iss(line);
 	double x, y, z, u, v, w;
 	iss >> x >> y >> z;
 	if (iss.fail()) {
@@ -185,23 +202,23 @@ bool isXYZLine(const std::string& line) {
 	}
 
 	iss.clear(); // Clear the fail state and check if we reached the end of the line after XYZ
-	std::string remaining;
+	string remaining;
 	iss >> remaining;
 	return remaining.empty(); // True if only XYZ were in the line and nothing else
 }
 
-std::vector<PTSPoint> ReadPointsFromFile(const std::string& filename) {
-	std::vector<PTSPoint> points;
-	std::ifstream inFile(filename);
-	std::string line;
+vector<PTSPoint> ReadPointsFromFile(const string& filename) {
+	vector<PTSPoint> points;
+	ifstream inFile(filename);
+	string line;
 	PTSPoint point;
 
-	while (std::getline(inFile, line)) {
+	while (getline(inFile, line)) {
 		if (!isXYZLine(line)) {
 			continue; // Skip lines until an XYZ line is found
 		}
 
-		std::istringstream iss(line);
+		istringstream iss(line);
 		if (iss >> point.x >> point.y >> point.z) { // Assuming the format is "x y z"
 			points.push_back(point);
 		}
@@ -210,27 +227,27 @@ std::vector<PTSPoint> ReadPointsFromFile(const std::string& filename) {
 	return points;
 }
 
-bool needsPrecisionAdjustment(const std::string& coordinate) {
+bool needsPrecisionAdjustment(const string& coordinate) {
 	size_t dotPosition = coordinate.find('.');
-	if (dotPosition != std::string::npos && dotPosition + precision + 1 < coordinate.length()) {
+	if (dotPosition != string::npos && dotPosition + precision + 1 < coordinate.length()) {
 		return true; // Check if there are more than x digits after the decimal point
 	}
 	return false;
 }
 
-std::string adjustPrecision(double value) {
-	std::ostringstream oss;
-	oss << std::fixed << std::setprecision(precision) << value;
+string adjustPrecision(double value) {
+	ostringstream oss;
+	oss << fixed << setprecision(precision) << value;
 	return oss.str();
 }
 
-std::string process_line(const std::string& line, double& offset_x, double& offset_y, double& offset_z
+string process_line(const string& line, double& offset_x, double& offset_y, double& offset_z
 	, double angle_x, double angle_y, double angle_z) {
-	std::istringstream iss(line);
+	istringstream iss(line);
 	double x, y, z, temp_x, temp_y, temp_z,
-		u = std::numeric_limits<double>::quiet_NaN(),
-		v = std::numeric_limits<double>::quiet_NaN(),
-		w = std::numeric_limits<double>::quiet_NaN();
+		u = numeric_limits<double>::quiet_NaN(),
+		v = numeric_limits<double>::quiet_NaN(),
+		w = numeric_limits<double>::quiet_NaN();
 	iss >> x >> y >> z;
 	iss >> u >> v >> w; // Attempt to read UVW. Will fail for XYZ lines.
 	bool uvwRead = !iss.fail(); // Check if UVW read was successful
@@ -258,23 +275,23 @@ std::string process_line(const std::string& line, double& offset_x, double& offs
 	y = temp_y;
 	z = temp_z;
 
-	std::string sx = std::to_string(x);
-	std::string sy = std::to_string(y);
-	std::string sz = std::to_string(z);
-	std::string su, sv, sw;
+	string sx = to_string(x);
+	string sy = to_string(y);
+	string sz = to_string(z);
+	string su, sv, sw;
 
 
 	if (uvwRead) {
-		su = std::to_string(u);
-		sv = std::to_string(v);
-		sw = std::to_string(w);
+		su = to_string(u);
+		sv = to_string(v);
+		sw = to_string(w);
 	}
 
 	bool needsAdjustment = needsPrecisionAdjustment(sx) || needsPrecisionAdjustment(sy) || needsPrecisionAdjustment(sz) ||
 		(uvwRead && (needsPrecisionAdjustment(su) || needsPrecisionAdjustment(sv) || needsPrecisionAdjustment(sw)));
 
 	if (needsAdjustment) {
-		std::ostringstream oss;
+		ostringstream oss;
 		oss << adjustPrecision(x) << " "
 			<< adjustPrecision(y) << " "
 			<< adjustPrecision(z);
@@ -288,9 +305,9 @@ std::string process_line(const std::string& line, double& offset_x, double& offs
 	}
 }
 
-std::vector<std::string> removeConsecutiveDuplicates(const std::vector<std::string>& lines) {
-	std::vector<std::string> uniqueLines;
-	std::unordered_set<std::string> seen;
+vector<string> removeConsecutiveDuplicates(const vector<string>& lines) {
+	vector<string> uniqueLines;
+	unordered_set<string> seen;
 
 	for (const auto& line : lines) {
 		// Attempt to insert the line into the set to check if it's a duplicate
@@ -305,16 +322,16 @@ std::vector<std::string> removeConsecutiveDuplicates(const std::vector<std::stri
 	return uniqueLines;
 }
 
-void process_pts(std::string& inputFile, std::string& outputFile, double& offset_x, double& offset_y, double& offset_z,
+void process_pts(string& inputFile, string& outputFile, double& offset_x, double& offset_y, double& offset_z,
 	double& rotX, double& rotY, double& rotZ) {
 	bool _ReadLine = true;
-	std::vector<std::string> lines;
-	std::ifstream PTS_in(inputFile);
+	vector<string> lines;
+	ifstream PTS_in(inputFile);
 	if (PTS_in) {
-		std::vector<PTSPoint> points = ReadPointsFromFile(inputFile);
-		std::string line;
+		vector<PTSPoint> points = ReadPointsFromFile(inputFile);
+		string line;
 
-		while (std::getline(PTS_in, line)) {
+		while (getline(PTS_in, line)) {
 			if (!isXYZLine(line)) {
 				continue; // Skip lines until an XYZ line is found
 			}
@@ -324,7 +341,7 @@ void process_pts(std::string& inputFile, std::string& outputFile, double& offset
 		lines = removeConsecutiveDuplicates(lines); // Remove duplicates while preserving order
 	}
 
-	std::ofstream PTS_out(outputFile);
+	ofstream PTS_out(outputFile);
 	if (PTS_out) {
 		PTS_out << "# (Created by Banna)" << "\n";
 		for (const auto& l : lines) {
@@ -342,9 +359,9 @@ static void displayUserName() {
 	_dupenv_s(&username, &sizeUsername, "USERNAME");
 	_dupenv_s(&userdomain, &sizeUserdomain, "USERDOMAIN");
 
-	std::cout << "\n        USERNAME: "
+	cout << "\n        USERNAME: "
 		<< (userdomain ? userdomain : "Unknown") << "\\"
-		<< (username ? username : "Unknown") << std::endl;
+		<< (username ? username : "Unknown") << endl;
 
 	free(username);
 	free(userdomain);
@@ -366,119 +383,42 @@ void setConsoleSize(int width, int height) {
 	windowSize.Bottom = height - 1;  // Height of the window
 
 	if (!SetConsoleWindowInfo(hStdout, TRUE, &windowSize)) {
-		std::cerr << "        Setting console window size failed." << std::endl;
+		cerr << "        Setting console window size failed." << endl;
 	}
 }
 
-class RotationSliderCallback : public vtkCommand {
-public:
-	static RotationSliderCallback* New() {
-		return new RotationSliderCallback;
-	}
 
-	RotationSliderCallback() : RotActor(nullptr) {}
 
-	void Execute(vtkObject* caller, unsigned long, void*) override {
-		vtkSliderWidget* sliderWidget = reinterpret_cast<vtkSliderWidget*>(caller);
-		vtkSliderRepresentation* sliderRep = dynamic_cast<vtkSliderRepresentation*>(sliderWidget->GetRepresentation());
-		if (!sliderRep) return;
-		double value = scaleValue(sliderRep->GetValue(), 180.0);
-
-		if (RotPtr) *RotPtr = value;  // Update the external CutHeight variable
-		else std::cerr << "        Warning: RotPtr is not initialized." << std::endl;
-
-		if (this->RotActor) {
-			double CurrentRot[4];
-			this->RotActor->GetOrientation(CurrentRot);
-			this->RotActor->SetOrientation(CurrentRot[0], CurrentRot[1], value);  // Set Z-position of the cutting plane
-			//if (DEBUG) std::cout << Yellow << "        Rotation Slider : " << ColorEnd << value << std::endl;
-			//if (DEBUG) std::cout << Yellow << "        Mesh Orientation:  " << ColorEnd
-			//	<< CurrentRot[0] << "  "
-			//	<< CurrentRot[1] << "  "
-			//	<< CurrentRot[2] << "  "
-			//	<< CurrentRot[3] << std::endl;
-		}
-		char label[50];
-		sprintf_s(label, "%.1f", value);  // Format to two decimal places
-		sliderRep->SetLabelFormat(label);
-
-		sliderWidget->GetInteractor()->GetRenderWindow()->Render(); // Update the display
-	}
-
-	void SetRotActor(vtkActor* actor) {
-		this->RotActor = actor;
-	}
-	void SetRotPtr(double* ptr) {
-		RotPtr = ptr;
-	}
-	double scaleValue(double input, double factor) {
-		double normalizedInput = input / factor;  // Normalize to -1 to 1
-		return factor * normalizedInput * normalizedInput * (input < 0 ? -1 : 1);  // Scale back to -180 to 180
-	}
-
-private:
-	vtkActor* RotActor;
-	double* RotPtr = nullptr;
-};
-
-class CutSliderCallback : public vtkCommand
-{
-public:
-	static CutSliderCallback* New() {
-		return new CutSliderCallback();
-	}
-
-	CutSliderCallback() : CutHeightPtr(nullptr) {}
-
-	virtual void Execute(vtkObject* caller, unsigned long eventId, void*) override {
-		vtkSliderWidget* sliderWidget = reinterpret_cast<vtkSliderWidget*>(caller);
-		vtkSliderRepresentation* sliderRep = dynamic_cast<vtkSliderRepresentation*>(sliderWidget->GetRepresentation());
-		if (!sliderRep) return;
-		double value = sliderRep->GetValue();
-		if (CutHeightPtr) *CutHeightPtr = value;  // Update the external CutHeight variable
-		else std::cerr << "        Warning: CutHeightPtr is not initialized." << std::endl;
-
-		if (value >= mincut || value <= maxcut) {
-			double CurrentPos[4];
-			this->CuttingDisk->GetPosition(CurrentPos);
-			this->CuttingDisk->SetPosition(CurrentPos[0], CurrentPos[1], value);  // Set Z-position of the cutting plane
-			//if (DEBUG) std::cout << Yellow << "        Cut Slider : " << ColorEnd << value << std::endl;
-		}
-
-		char label[50];
-		sprintf_s(label, "%.1f", value);  // Format to two decimal places
-		sliderRep->SetLabelFormat(label);
-
-		sliderWidget->GetInteractor()->GetRenderWindow()->Render(); // Update the display
-	}
-
-	void SetModelActor(vtkActor* actor) {
-		this->CuttingDisk = actor;
-	}
-	void SetCutHeightPtr(double* ptr) {
-		CutHeightPtr = ptr;
-	}
-
-private:
-	vtkActor* CuttingDisk;
-	double* CutHeightPtr = nullptr;
-};
 
 class C_InteractorStyle : public vtkInteractorStyleTrackballCamera {
+
 public:
 	static C_InteractorStyle* New();
-	//vtkTypeMacro(C_InteractorStyle, vtkInteractorStyleTrackballCamera);
+	// vtkTypeMacro(C_InteractorStyle, vtkInteractorStyleTrackballCamera);
 
-	vtkSmartPointer<vtkHardwarePicker> Picker;
+	unsigned int NumberOfClicks;
+	int LastPointPosition[2];
+	int ResetPixelDistance;
+	chrono::high_resolution_clock::time_point LastClickTime;
+	vector<array<double, 3>> SpherePositions;
+	vector<vtkSmartPointer<vtkActor>> SphereActors;
+	vtkNew<vtkTextActor> PPTextActor;
+	int SpheresCount = 0;
+
+	vtkSmartPointer<vtkHardwarePicker> ModelPicker;
 	vtkSmartPointer<vtkTextActor> TextActor;
 	vtkSmartPointer<vtkActor> SelectedMesh;  // The mesh to pick
-	vtkSmartPointer<vtkActor> MeshActor;
 	bool IsMeshSelected = false;
-	int LastPosition[2] = { -1, -1 };
+	int LastModelPosition[2] = { -1, -1 };
 	double X_offset, Y_offset;
+	double* CutHeightPtr = nullptr;
+	double* RotPtr = nullptr;
+	vtkActor* MovableMeshActor = nullptr;
 
-	C_InteractorStyle() : X_offset(0), Y_offset(0) {
-		this->Picker = vtkSmartPointer<vtkHardwarePicker>::New();
+	C_InteractorStyle() : X_offset(0), Y_offset(0), NumberOfClicks(0), ResetPixelDistance(5) {
+		this->LastPointPosition[0] = 0;
+		this->LastPointPosition[1] = 0;
+		this->ModelPicker = vtkSmartPointer<vtkHardwarePicker>::New();
 		this->TextActor = vtkSmartPointer<vtkTextActor>::New();
 		this->TextActor->GetTextProperty()->SetFontSize(20);
 		this->TextActor->GetTextProperty()->SetColor(1.0, 1.0, 1.0); // 0.7, 0.5, 0.3
@@ -487,31 +427,258 @@ public:
 
 		this->SelectedMesh = nullptr;
 		this->IsMeshSelected = false;
-		this->LastPosition[0] = this->LastPosition[1] = 0;
+		this->LastModelPosition[0] = this->LastModelPosition[1] = 0;
+	}
+
+	void SetModelActor(vtkActor* actor) {
+		this->MovableMeshActor = actor;
+	}
+
+	void getCutHeightPtr(double* ptr) {
+		this->CutHeightPtr = ptr;
+	}
+
+	void getRotPtr(double* ptr) {
+		this->RotPtr = ptr;
+	}
+
+	const vector<array<double, 3>>& getSpherePositions() const {
+		return this->SpherePositions;
+	}
+
+	double scaleValue(double input, double factor) {
+		double normalizedInput = input / factor;  // Normalize to -1 to 1
+		return factor * normalizedInput * normalizedInput * (input < 0 ? -1 : 1);  // Scale back to -180 to 180
+	}
+
+	void CutSliderCallback(vtkObject* caller, unsigned long eventId, void* callData) {
+		vtkSliderWidget* sliderWidget = reinterpret_cast<vtkSliderWidget*>(caller);
+		vtkSliderRepresentation* sliderRep = dynamic_cast<vtkSliderRepresentation*>(sliderWidget->GetRepresentation());
+		if (!sliderRep) return;
+		double value = sliderRep->GetValue();
+		if (CutHeightPtr) *CutHeightPtr = value;  // Update the external CutHeight variable
+		else cerr << "        Warning: CutHeightPtr is not initialized." << endl;
+
+		if (value >= mincut || value <= maxcut) {
+			double CurrentPos[4];
+			this->MovableMeshActor->GetPosition(CurrentPos);
+			this->MovableMeshActor->SetPosition(CurrentPos[0], CurrentPos[1], value);  // Set Z-position of the cutting plane
+
+			double deltaZ = value - CurrentPos[2];
+
+			for (size_t i = 0; i < this->SpherePositions.size(); ++i) {
+				double SpherePos[3];
+				this->SphereActors[i]->GetPosition(SpherePos);
+				this->SphereActors[i]->SetPosition(SpherePos[0], SpherePos[1], SpherePos[2] + deltaZ);
+
+				// Update SpherePositions array
+				this->SpherePositions[i][2] += deltaZ;
+			}
+		}
+
+		char label[50];
+		sprintf_s(label, "%.1f", value);  // Format to two decimal places
+		sliderRep->SetLabelFormat(label);
+
+		sliderWidget->GetInteractor()->Render(); // Update the display
+	}
+
+	void RotationSliderCallback(vtkObject* caller, unsigned long eventId, void* callData) {
+		vtkSliderWidget* sliderWidget = reinterpret_cast<vtkSliderWidget*>(caller);
+		vtkSliderRepresentation* sliderRep = dynamic_cast<vtkSliderRepresentation*>(sliderWidget->GetRepresentation());
+		if (!sliderRep) return;
+		double value = scaleValue(sliderRep->GetValue(), 180.0);
+
+		if (RotPtr) *RotPtr = value;  // Update the external RotZ variable
+		else cerr << "        Warning: RotPtr is not initialized." << endl;
+
+
+		double CurrentRot[4];
+		this->MovableMeshActor->GetOrientation(CurrentRot);
+		this->MovableMeshActor->SetOrientation(CurrentRot[0], CurrentRot[1], value);  // Set Z-position of the cutting plane
+
+		for (size_t i = 0; i < this->SpherePositions.size(); ++i) {
+			double SphereRot[4];
+			this->SphereActors[i]->GetOrientation(SphereRot);
+			this->SphereActors[i]->SetOrientation(SphereRot[0], SphereRot[1], value);  // Set Z-position of the cutting plane
+		}
+
+		char label[50];
+		sprintf_s(label, "%.1f", value);  // Format to two decimal places
+		sliderRep->SetLabelFormat(label);
+
+		sliderWidget->GetInteractor()->Render(); // Update the display
+	}
+
+
+	virtual void OnMouseMove() override {
+		if (this->IsMeshSelected && this->SelectedMesh) {
+			int* newPos = this->GetInteractor()->GetEventPosition();
+
+			// Convert new mouse position to world coordinates
+			double displayPos[3] = { double(newPos[0]), double(newPos[1]), 0.0 };
+			this->GetDefaultRenderer()->SetDisplayPoint(displayPos);
+			this->GetDefaultRenderer()->DisplayToWorld();
+			this->GetDefaultRenderer()->GetWorldPoint(displayPos);
+
+			// Convert last position to world coordinates
+			double lastDisplayPos[3] = { double(LastModelPosition[0]), double(LastModelPosition[1]), 0.0 };
+			this->GetDefaultRenderer()->SetDisplayPoint(lastDisplayPos);
+			this->GetDefaultRenderer()->DisplayToWorld();
+			this->GetDefaultRenderer()->GetWorldPoint(lastDisplayPos);
+
+			// Calculate movement deltas
+			double Dx = displayPos[0] - lastDisplayPos[0];
+			double Dy = displayPos[1] - lastDisplayPos[1];
+
+			// Update mesh position
+			double MeshPos[3];
+			this->SelectedMesh->GetPosition(MeshPos);
+			this->SelectedMesh->SetPosition(MeshPos[0] + Dx, MeshPos[1] + Dy, MeshPos[2]);
+
+			for (size_t i = 0; i < this->SpherePositions.size(); ++i) {
+				double SpherePos[3];
+				this->SphereActors[i]->GetPosition(SpherePos);
+				this->SphereActors[i]->SetPosition(SpherePos[0] + Dx, SpherePos[1] + Dy, SpherePos[2]);
+
+				this->SpherePositions[i][0] += Dx;
+				this->SpherePositions[i][1] += Dy;
+			}
+
+			//if (DEBUG) cout << YELLOW << "        Moved to " << END 
+			//	<< "X " << format("{:.2f}", pos[0] + Dx) << ", Y " << format("{:.2f}", pos[1] + Dy) << endl;
+			this->TextActor->SetInput(("X " + format("{:.2f}", MeshPos[0] + Dx) + " Y " + format("{:.2f}", MeshPos[1] + Dy)).c_str());
+
+			this->LastModelPosition[0] = newPos[0];
+			this->LastModelPosition[1] = newPos[1];
+
+			this->GetInteractor()->Render();
+		}
+		else {
+			vtkInteractorStyleTrackballCamera::OnMouseMove();
+		}
+	}
+
+	double calculateDistance(double* p1, array<double, 3> p2) {
+		return sqrt(
+			pow(p1[0] - p2[0], 2) +
+			pow(p1[1] - p2[1], 2) +
+			pow(p1[2] - p2[2], 2));
+	};
+
+	virtual void OnDoubleClick(bool PutSphere) {
+		// Point Position Text
+		this->GetDefaultRenderer()->RemoveActor(this->PPTextActor);
+		this->PPTextActor->GetTextProperty()->SetFontSize(23);
+		this->PPTextActor->GetTextProperty()->SetColor(0.0, 1.0, 0.0);
+		this->PPTextActor->SetDisplayPosition(250, 10);
+
+		int* clickPos = this->GetInteractor()->GetEventPosition();
+		vtkNew<vtkCellPicker> CellPicker;
+		CellPicker->SetTolerance(0.0005);
+		CellPicker->Pick(clickPos[0], clickPos[1], 0, this->GetDefaultRenderer());
+		double* CellPickerPos = CellPicker->GetPickPosition();
+		if (PutSphere) {
+			if (this->SpherePositions.size() >= 4) {
+				this->PPTextActor->SetInput(format("Maximum {} Points reached!", this->SpherePositions.size()).c_str());
+			}
+			else {
+				if (CellPicker->GetCellId() != -1 && CellPicker->GetActor() == this->MovableMeshActor) {
+					// Check if a sphere already exists near this location
+					bool distanceOK = true;
+					for (array<double, 3> spherePos : this->SpherePositions) {
+						double distance = calculateDistance(CellPickerPos, spherePos);
+						if (distance <= 3.0 || CellPickerPos[2] < 4.5) {
+							if (CellPickerPos[2] < 4.5)
+								this->PPTextActor->SetInput(format("Minimum distance {:.2f} in Z reached!", CellPickerPos[2]).c_str());
+							else
+								this->PPTextActor->SetInput(format("Minimum distance {:.2f} between Points reached!", distance).c_str());
+							distanceOK = false;
+						}
+					}
+					if (distanceOK) {
+						// Create a sphere at the picked position
+						vtkNew<vtkSphereSource> sphereSource;
+						sphereSource->SetCenter(CellPickerPos);
+						sphereSource->SetRadius(0.75);
+						vtkNew<vtkPolyDataMapper> sphereMapper;
+						sphereMapper->SetInputConnection(sphereSource->GetOutputPort());
+						vtkNew<vtkActor> sphereActor;
+						sphereActor->SetMapper(sphereMapper);
+						sphereActor->GetProperty()->SetColor(0.0, 1.0, 0.0); // Green color
+						this->GetDefaultRenderer()->AddActor(sphereActor);
+
+						SpheresCount++;
+						this->PPTextActor->SetInput(format("Point {} Position: {:.2f}, {:.2f}, {:.2f}", SpheresCount, CellPickerPos[0], CellPickerPos[1], CellPickerPos[2]).c_str());
+
+						this->SpherePositions.push_back({ CellPickerPos[0], CellPickerPos[1], CellPickerPos[2] });
+						this->SphereActors.push_back(sphereActor);
+					}
+				}
+			}
+		}
+		else {
+			if (CellPicker->GetCellId() != -1) {
+				for (size_t i = 0; i < this->SpherePositions.size(); ++i) {
+					double distance = calculateDistance(CellPickerPos, this->SpherePositions[i]);
+					if (distance <= 3.0) {
+						this->PPTextActor->SetInput(format("Point {} Removed: {:.2f}, {:.2f}, {:.2f}", SpheresCount, CellPickerPos[0], CellPickerPos[1], CellPickerPos[2]).c_str());
+						this->GetDefaultRenderer()->RemoveActor(this->SphereActors[i]);
+						this->SpherePositions.erase(this->SpherePositions.begin() + i);
+						this->SphereActors.erase(this->SphereActors.begin() + i);
+						SpheresCount--;
+					}
+				}
+			}
+		}
+		//this->GetInteractor()->GetRenderWindow()->Render();
+		//this->GetDefaultRenderer()->Render();
+		this->GetDefaultRenderer()->AddActor(this->PPTextActor);
+		this->GetInteractor()->Render();
 	}
 
 	virtual void OnLeftButtonDown() override
 	{
-		int* clickPos = this->GetInteractor()->GetEventPosition();
-		this->Picker->Pick(clickPos[0], clickPos[1], 0, this->GetDefaultRenderer());
-		vtkActor* Mactor = vtkActor::SafeDownCast(this->Picker->GetActor());
+		int* pickPosition = this->GetInteractor()->GetEventPosition();
+		this->ModelPicker->Pick(pickPosition[0], pickPosition[1], 0, this->GetDefaultRenderer());
+		vtkActor* Mactor = vtkActor::SafeDownCast(this->ModelPicker->GetActor());
 
-		if (Mactor && Mactor == this->MeshActor) {
-			this->SelectedMesh = Mactor;
-			this->IsMeshSelected = true;
-			this->LastPosition[0] = clickPos[0];
-			this->LastPosition[1] = clickPos[1];
+		auto now = chrono::high_resolution_clock::now();
+		auto duration = chrono::duration_cast<chrono::milliseconds>(now - this->LastClickTime).count();
+		int xdist = pickPosition[0] - this->LastPointPosition[0];
+		int ydist = pickPosition[1] - this->LastPointPosition[1];
+		int moveDistance = static_cast<int>(sqrt(static_cast<double>(xdist * xdist + ydist * ydist)));
 
-			if (DEBUG) std::cout << Yellow << "        Mesh selected!" << ColorEnd << std::endl;
-			this->TextActor->SetInput("Mesh selected!");
-			this->SelectedMesh->GetProperty()->SetColor(1.0, 1.0, 0.0);  // Change color when selected
+		if (this->NumberOfClicks == 1 && duration <= 500 && moveDistance <= this->ResetPixelDistance) {
+			// Double click detected
+			this->OnDoubleClick(true);
+			this->NumberOfClicks = 0;
 		}
 		else {
-			if (DEBUG) std::cout << Yellow << "        Nothing selected!" << std::endl;
-			this->LastPosition[0] = 0; // Reset last position if no valid selection
-			this->LastPosition[1] = 0;
+			// Single click detected
+			this->NumberOfClicks = 1;
+			this->LastClickTime = now;
+			this->LastPointPosition[0] = pickPosition[0];
+			this->LastPointPosition[1] = pickPosition[1];
+
+			if (Mactor == this->MovableMeshActor) {
+				this->SelectedMesh = Mactor;
+				this->IsMeshSelected = true;
+				this->LastModelPosition[0] = pickPosition[0];
+				this->LastModelPosition[1] = pickPosition[1];
+
+				if (DEBUG) cout << YELLOW << "        Mesh selected!" << END << endl;
+				this->TextActor->SetInput("Mesh selected!");
+				this->SelectedMesh->GetProperty()->SetColor(1.0, 1.0, 0.0);  // Change color when selected
+			}
+			else {
+				this->StartPan();
+				if (DEBUG) cout << YELLOW << "        Nothing selected!" << endl;
+				this->LastModelPosition[0] = 0; // Reset last position if no valid selection
+				this->LastModelPosition[1] = 0;
+			}
 		}
-		this->Interactor->GetRenderWindow()->Render();
+		this->GetInteractor()->Render();
 	}
 
 	virtual void OnLeftButtonUp() override {
@@ -522,112 +689,77 @@ public:
 			X_offset = CurrentPos[0];
 			Y_offset = CurrentPos[1];
 
-			if (DEBUG) std::cout << Yellow << "        Final position offset: "
-				<< ColorEnd << "X " << CurrentPos[0] << "  Y " << CurrentPos[1] << std::endl;
+			if (DEBUG) cout << YELLOW << "        Final position offset: "
+				<< END << "X " << CurrentPos[0] << "  Y " << CurrentPos[1] << endl;
 
-			this->TextActor->SetInput(("X " + std::format("{:.2f}", CurrentPos[0]) + " Y " + std::format("{:.2f}", CurrentPos[1])).c_str());
+			this->TextActor->SetInput(("X " + format("{:.2f}", CurrentPos[0]) + " Y " + format("{:.2f}", CurrentPos[1])).c_str());
 			this->SelectedMesh->GetProperty()->SetColor(0.85, 0.85, 0.85);
-			this->Interactor->GetRenderWindow()->Render();
+			this->GetInteractor()->Render();
 
 			this->IsMeshSelected = false;
 			this->SelectedMesh = nullptr;
 		}
-	}
-
-	virtual void OnMouseMove() override {
-		if (this->IsMeshSelected && this->SelectedMesh) {
-			vtkRenderWindowInteractor* RenderWindowInteractor = this->Interactor;
-			vtkRenderer* renderer = this->GetDefaultRenderer();
-
-			int* newPos = RenderWindowInteractor->GetEventPosition();
-
-			// Convert new mouse position to world coordinates
-			double displayPos[3] = { double(newPos[0]), double(newPos[1]), 0.0 };
-			renderer->SetDisplayPoint(displayPos);
-			renderer->DisplayToWorld();
-			renderer->GetWorldPoint(displayPos);
-
-			// Convert last position to world coordinates
-			double lastDisplayPos[3] = { double(LastPosition[0]), double(LastPosition[1]), 0.0 };
-			renderer->SetDisplayPoint(lastDisplayPos);
-			renderer->DisplayToWorld();
-			renderer->GetWorldPoint(lastDisplayPos);
-
-			// Calculate movement deltas
-			double Dx = displayPos[0] - lastDisplayPos[0];
-			double Dy = displayPos[1] - lastDisplayPos[1];
-
-			// Update mesh position
-			double pos[3];
-			this->SelectedMesh->GetPosition(pos);
-			this->SelectedMesh->SetPosition(pos[0] + Dx, pos[1] + Dy, pos[2]);
-
-			//if (DEBUG) std::cout << Yellow << "        Moved to " << ColorEnd
-			//	<< "X " << std::format("{:.2f}", pos[0] + Dx) << ", Y " << std::format("{:.2f}", pos[1] + Dy) << std::endl;
-			this->TextActor->SetInput(("X " + std::format("{:.2f}", pos[0] + Dx) + " Y " + std::format("{:.2f}", pos[1] + Dy)).c_str());
-
-			this->LastPosition[0] = newPos[0];
-			this->LastPosition[1] = newPos[1];
-
-			RenderWindowInteractor->Render();
-		}
-
-		if (!this->IsMeshSelected) {
-			vtkInteractorStyleTrackballCamera::OnMouseMove();
-		}
-	}
-
-	virtual void OnMiddleButtonDown() override {
-		this->StartPan();
-	}
-
-	virtual void OnMiddleButtonUp() override {
+		this->GetInteractor()->Render();
+		this->EndRotate();
 		this->EndPan();
+		this->EndDolly();
 	}
 
 	virtual void OnRightButtonDown() override {
-		this->StartRotate();
+		int pickPosition[2];
+		this->GetInteractor()->GetEventPosition(pickPosition);
+		auto now = chrono::high_resolution_clock::now();
+		auto duration = chrono::duration_cast<chrono::milliseconds>(now - this->LastClickTime).count();
+		int xdist = pickPosition[0] - this->LastPointPosition[0];
+		int ydist = pickPosition[1] - this->LastPointPosition[1];
+		int moveDistance = static_cast<int>(sqrt(static_cast<double>(xdist * xdist + ydist * ydist)));
+
+		if (this->NumberOfClicks == 1 && duration <= 500 && moveDistance <= this->ResetPixelDistance) {
+			// Double click detected
+			this->OnDoubleClick(false);
+			this->NumberOfClicks = 0;
+		}
+		else {
+			// Single click detected
+			this->StartRotate();
+			this->NumberOfClicks = 1;
+			this->LastClickTime = now;
+			this->LastPointPosition[0] = pickPosition[0];
+			this->LastPointPosition[1] = pickPosition[1];
+		}
+		this->GetInteractor()->Render();
 	}
 
 	virtual void OnRightButtonUp() override {
+		this->GetInteractor()->Render();
 		this->EndRotate();
+		this->EndPan();
+		this->EndDolly();
 	}
 
-	virtual void Pan() override {
-		if (this->CurrentRenderer == nullptr || this->Interactor == nullptr) return;
-		vtkRenderWindowInteractor* rwi = this->Interactor;
-		vtkCamera* camera = this->CurrentRenderer->GetActiveCamera();
-		if (!camera) return;
-		int* lastPos = rwi->GetLastEventPosition();
-		int* newPos = rwi->GetEventPosition();
-		double dx = newPos[0] - lastPos[0];
-		double dy = newPos[1] - lastPos[1];
-		double scale = 0.05; // Adjust this scale to control the sensitivity of panning
-		dx *= scale;
-		dy *= scale;
-		double right[3], up[3];
-		camera->GetViewUp(up);
-		this->CurrentRenderer->GetActiveCamera()->OrthogonalizeViewUp();
-		vtkMath::Cross(camera->GetDirectionOfProjection(), up, right);
-		vtkMath::Normalize(right);
-		double cameraPosition[3], cameraFocalPoint[3];
-		camera->GetPosition(cameraPosition);
-		camera->GetFocalPoint(cameraFocalPoint);
-		for (int i = 0; i < 3; i++) {
-			cameraPosition[i] += dx * right[i] + dy * up[i];
-			cameraFocalPoint[i] += dx * right[i] + dy * up[i];
-		}
-		camera->SetPosition(cameraPosition);
-		camera->SetFocalPoint(cameraFocalPoint);
-		this->CurrentRenderer->ResetCameraClippingRange();
-		rwi->Render();
+	virtual void OnMiddleButtonDown() override {
+		this->StartRotate();
+		this->GetDefaultRenderer()->ResetCamera();
+		this->GetDefaultRenderer()->GetActiveCamera()->SetPosition(0, 0, 160);
+		this->GetDefaultRenderer()->GetActiveCamera()->SetFocalPoint(0, 0, 0);
+		this->GetDefaultRenderer()->GetActiveCamera()->SetViewUp(0, 1, 0);
+		this->GetDefaultRenderer()->ResetCameraClippingRange();
+		this->GetInteractor()->Render();
+		//_fixture_Data
+		//vtkInteractorStyleTrackballCamera::OnMiddleButtonDown();
+	}
+
+	virtual void OnMiddleButtonUp() override {
+		this->EndRotate();
+		this->EndPan();
+		this->EndDolly();
 	}
 
 	virtual void Dolly(double amount) override {
-		if (this->CurrentRenderer == nullptr || this->Interactor == nullptr) return;
-		vtkCamera* camera = this->CurrentRenderer->GetActiveCamera();
+		if (this->GetDefaultRenderer() == nullptr || this->GetInteractor() == nullptr) return;
+		vtkCamera* camera = this->GetDefaultRenderer()->GetActiveCamera();
 		if (!camera) return;
-		const double DollyScaleFactor = 0.1, minDis = 50, maxDis = 300;
+		const double DollyScaleFactor = 0.3, minDis = 30, maxDis = 600;
 		amount = 1.0 + (amount - 1.0) * DollyScaleFactor;
 
 		double newDistance = (camera->GetDistance()) * (1.0 / amount);  // Adjust the interpretation of amount
@@ -636,17 +768,48 @@ public:
 		else if (newDistance > maxDis) camera->SetDistance(maxDis);
 		else camera->Dolly(amount);
 
-		//if (DEBUG) std::cout << Yellow << "        Current Zoom Level: " << ColorEnd << camera->GetDistance() << std::endl;
-		this->CurrentRenderer->ResetCameraClippingRange();
-		this->Interactor->Render();
+		//if (DEBUG) cout << YELLOW << "      Current Zoom Level: " << END << camera->GetDistance() << endl;
+		this->GetDefaultRenderer()->ResetCameraClippingRange();
+		this->GetInteractor()->Render();
 	}
+
+
+	//virtual void Pan() override {
+	//	if (this->GetDefaultRenderer() == nullptr || this->GetInteractor() == nullptr) return;
+	//	//vtkRenderWindowInteractor* rwi = this->GetInteractor();
+	//	vtkCamera* camera = this->GetDefaultRenderer()->GetActiveCamera();
+	//	if (!camera) return;
+	//	int* lastPos = this->GetInteractor()->GetLastEventPosition();
+	//	int* newPos = this->GetInteractor()->GetEventPosition();
+	//	double dx = newPos[0] - lastPos[0];
+	//	double dy = newPos[1] - lastPos[1];
+	//	double scale = 0.1; // Adjust this scale to control the sensitivity of panning
+	//	dx *= scale;
+	//	dy *= scale;
+	//	double right[3], up[3];
+	//	camera->GetViewUp(up);
+	//	this->GetDefaultRenderer()->GetActiveCamera()->OrthogonalizeViewUp();
+	//	vtkMath::Cross(camera->GetDirectionOfProjection(), up, right);
+	//	vtkMath::Normalize(right);
+	//	double cameraPosition[3], cameraFocalPoint[3];
+	//	camera->GetPosition(cameraPosition);
+	//	camera->GetFocalPoint(cameraFocalPoint);
+	//	for (int i = 0; i < 3; i++) {
+	//		cameraPosition[i] += dx * right[i] + dy * up[i];
+	//		cameraFocalPoint[i] += dx * right[i] + dy * up[i];
+	//	}
+	//	camera->SetPosition(cameraPosition);
+	//	camera->SetFocalPoint(cameraFocalPoint);
+	//	this->GetDefaultRenderer()->ResetCameraClippingRange();
+	//	this->GetInteractor()->Render();
+	//}
 };
 vtkStandardNewMacro(C_InteractorStyle);
 
 vtkNew<vtkPolyData> mesh_to_vtk(const Cgal_Mesh& mesh, bool DEBUG) {
 	vtkNew<vtkPoints> VTKpoints;
 	vtkNew<vtkCellArray> polygons;
-	std::map<Cgal_Vertex, vtkIdType> vertexIdMap;
+	map<Cgal_Vertex, vtkIdType> vertexIdMap;
 	vtkIdType vtkId = 0;
 	for (auto v : mesh.vertices()) {
 		const Cgal_Point& p = mesh.point(v);
@@ -668,7 +831,7 @@ vtkNew<vtkPolyData> mesh_to_vtk(const Cgal_Mesh& mesh, bool DEBUG) {
 	vtkNew<vtkPolyData> polyData;
 	polyData->SetPoints(VTKpoints);
 	polyData->SetPolys(polygons);
-	if (DEBUG) std::cout << Yellow << "        Mesh prepared for Viewer." << ColorEnd << std::endl;
+	if (DEBUG) cout << YELLOW << "        Mesh prepared for Viewer." << END << endl;
 	return polyData;
 }
 
@@ -699,11 +862,11 @@ void OKButtonCallbackFunction(vtkObject* caller, long unsigned int, void* client
 	const char* currentText = textActor->GetInput();
 	if (strcmp(currentText, "OK") == 0) {
 		textActor->SetInput("DONE");
-		std::cout << "DONE" << std::endl;
+		cout << "DONE" << endl;
 	}
 	else {
 		textActor->SetInput("OK");
-		std::cout << "OK" << std::endl;
+		cout << "OK" << endl;
 	}
 
 	// Get the button representation and renderer from the button widget
@@ -727,20 +890,13 @@ void CLOSEButtonCallbackFunction(vtkObject* caller, long unsigned int, void*, vo
 	return;
 }
 
-//void MouseMoveCallbackFunction(vtkObject* caller, long unsigned int eventId, void* clientData, void* callData) {
-//	vtkRenderWindowInteractor* interactor = static_cast<vtkRenderWindowInteractor*>(caller);
-//	int x, y;
-//	interactor->GetEventPosition(x, y);
-//	std::cout << "        Mouse position: (" << x << ", " << y << ")" << std::endl;
-//}
+void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const string ID, Cgal_Mesh staticMesh, double& Xoffset, double& Yoffset,
+	double& CutHeight, double& RotZ, vector<array<double, 3>>& PointsPositions, bool DEBUG) {
 
-void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID, Cgal_Mesh staticMesh, double& Xoffset, double& Yoffset,
-	double& CutHeight, double& RotZ, bool DEBUG) {
-
-	if (DEBUG) std::cout << Yellow << "        Starting Mesh Viewer." << ColorEnd << std::endl;
+	if (DEBUG) cout << YELLOW << "        Starting Mesh Viewer." << END << endl;
 	CutHeight = 0.0; RotZ = 0.0;
 
-	byte WIN_TRANS = 245;
+	BYTE WIN_TRANS = 245;
 	double bkR = 0.129, bkG = 0.129, bkB = 0.141,
 		movR = 1.0, movG = 1.0, movB = 1.0,
 		stR = 0.7, stG = 0.5, stB = 0.3;
@@ -763,7 +919,7 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 
 	// Window and interactor setup
 	vtkNew<vtkRenderWindow> renderWindow;
-	renderWindow->SetSize(700, 600);
+	renderWindow->SetSize(900, 800);
 	renderWindow->SetWindowName("AB Dental Tool");
 	renderWindow->SetAlphaBitPlanes(1);
 	renderWindow->SetMultiSamples(0);
@@ -800,11 +956,11 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	InsetRenderer->AddActor(movableActor);
 
 	//// PTS actor
-	//std::ifstream ptsFile(PTSfilepath);
+	//ifstream ptsFile(PTSfilepath);
 	//vtkNew<vtkPoints> PTSpoints;
-	//std::string line;
-	//while (std::getline(ptsFile, line)) {
-	//	std::istringstream iss(line);
+	//string line;
+	//while (getline(ptsFile, line)) {
+	//	istringstream iss(line);
 	//	double x, y, z;
 	//	iss >> x >> y >> z;
 	//	PTSpoints->InsertNextPoint(x, y, z);
@@ -841,7 +997,7 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	HeightTextActor->GetTextProperty()->SetFontSize(20);
 	HeightTextActor->GetTextProperty()->SetColor(1.0, 1.0, 1.0); // 0.7, 0.5, 0.3
 	HeightTextActor->SetDisplayPosition(10, 60);
-	HeightTextActor->SetInput(("Height: " + std::format("{:.2f}", Height_) + " mm").c_str());
+	HeightTextActor->SetInput(("Height: " + format("{:.2f}", Height_) + " mm").c_str());
 	MainRenderer->AddActor(HeightTextActor);
 
 	// Orientation Marker Widget - SetupCubeWidget(renderWindowInteractor, MainRenderer);
@@ -923,6 +1079,16 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	diskActor->GetProperty()->SetOpacity(0.5);
 	InsetRenderer->AddActor(diskActor);
 
+
+	// Custom Interaction Style
+	vtkSmartPointer<C_InteractorStyle> style = vtkSmartPointer<C_InteractorStyle>::New();
+	style->SetDefaultRenderer(MainRenderer);
+	style->SetModelActor(movableActor);
+	style->getRotPtr(&RotZ);
+	style->getCutHeightPtr(&CutHeight);
+	MainRenderer->AddActor(style->TextActor);
+	renderWindowInteractor->SetInteractorStyle(style);
+
 	// Cutting Slider - SetupCutSliderWidget(renderWindowInteractor, movableActor, CutHeight, mincut, maxcut, mincut);
 	vtkNew<vtkSliderRepresentation2D> CutSlider;
 	CutSlider->SetMinimumValue(mincut);
@@ -945,10 +1111,9 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	CutSliderWidget->SetRepresentation(CutSlider);
 	CutSliderWidget->SetAnimationModeToAnimate();
 	CutSliderWidget->SetEnabled(1);
-	vtkNew<CutSliderCallback> CutSlidercallback;
-	CutSlidercallback->SetModelActor(movableActor);
-	CutSlidercallback->SetCutHeightPtr(&CutHeight);
-	CutSliderWidget->AddObserver(vtkCommand::InteractionEvent, CutSlidercallback);
+	//CutSliderWidget->AddObserver(vtkCommand::InteractionEvent, C_InteractorStyle);
+	CutSliderWidget->AddObserver(vtkCommand::InteractionEvent, style, &C_InteractorStyle::CutSliderCallback);
+
 
 	// Rotate slider - SetupRotSliderWidget(renderWindowInteractor, movableActor, RotZ, -180, 180, 0);
 	vtkNew<vtkSliderRepresentation2D> RotSlider;
@@ -972,10 +1137,10 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	RotSliderWidget->SetRepresentation(RotSlider);
 	RotSliderWidget->SetAnimationModeToAnimate();
 	RotSliderWidget->SetEnabled(1);
-	vtkNew<RotationSliderCallback> RotSlidercallback;
-	RotSlidercallback->SetRotActor(movableActor);
-	RotSlidercallback->SetRotPtr(&RotZ);
-	RotSliderWidget->AddObserver(vtkCommand::InteractionEvent, RotSlidercallback);
+	//RotSliderWidget->AddObserver(vtkCommand::InteractionEvent, RotationSliderCallback);
+	RotSliderWidget->AddObserver(vtkCommand::InteractionEvent, style, &C_InteractorStyle::RotationSliderCallback);
+
+
 
 
 	// Button Widget
@@ -1058,6 +1223,7 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	camOrientManipulator->SetParentRenderer(MainRenderer);
 	camOrientManipulator->On();
 
+
 	MainRenderer->ResetCamera();
 	MainRenderer->GetActiveCamera()->SetPosition(0, 0, 160);
 	MainRenderer->GetActiveCamera()->SetFocalPoint(0, 0, 0);
@@ -1070,12 +1236,6 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	InsetRenderer->GetActiveCamera()->SetViewUp(0, 0, 1);
 	InsetRenderer->ResetCameraClippingRange();
 
-	// Custom Interaction Style
-	vtkNew<C_InteractorStyle> style;
-	style->SetDefaultRenderer(MainRenderer);
-	style->MeshActor = movableActor;
-	MainRenderer->AddActor(style->TextActor);
-	renderWindowInteractor->SetInteractorStyle(style);
 
 	renderWindow->Render();
 	//renderWindowInteractor->ProcessEvents();
@@ -1088,31 +1248,32 @@ void visualize_mesh(Cgal_Mesh movableMesh, double Height_, const std::string ID,
 	renderWindowInteractor->Initialize();
 	renderWindowInteractor->Start();
 
-	if (DEBUG) std::cout << Yellow << "        Viewer Exited." << ColorEnd << std::endl;
+	if (DEBUG) cout << YELLOW << "        Viewer Exited." << END << endl;
 
 	Xoffset = style->X_offset;
 	Yoffset = style->Y_offset;
+	PointsPositions = style->getSpherePositions();
 
-	if (DEBUG) std::cout << Yellow << "        Offsets: " << ColorEnd << "X" << Xoffset << "  Y" << Yoffset
-		<< "  Z" << CutHeight << "  Rot Z" << RotZ << std::endl;
-	std::cout << std::endl;
+	if (DEBUG) cout << YELLOW << "        Offsets: " << END << "X" << Xoffset << "  Y" << Yoffset
+		<< "  Z" << CutHeight << "  Rot Z" << RotZ << endl;
+	cout << endl;
 }
 
 void clean_difference(Cgal_Mesh& mesh, bool DEBUG) {
 	auto vpm = get(CGAL::vertex_point, mesh);
-	std::vector<std::size_t> component_ids(num_faces(mesh));
+	vector<size_t> component_ids(num_faces(mesh));
 	auto component_map = CGAL::make_property_map(component_ids);
-	std::size_t num_components = PMP::connected_components(mesh, component_map, PMP::parameters::vertex_point_map(vpm));
+	size_t num_components = PMP::connected_components(mesh, component_map, PMP::parameters::vertex_point_map(vpm));
 
-	std::vector<std::size_t> component_sizes(num_components, 0);
+	vector<size_t> component_sizes(num_components, 0);
 	for (Cgal_face_descriptor fd : faces(mesh)) {
 		++component_sizes[component_map[fd]];
 	}
 
-	std::size_t largest_component_id = std::distance(component_sizes.begin(),
-		std::max_element(component_sizes.begin(), component_sizes.end()));
+	size_t largest_component_id = distance(component_sizes.begin(),
+		max_element(component_sizes.begin(), component_sizes.end()));
 
-	std::vector<Cgal_Face> faces_to_remove;
+	vector<Cgal_Face> faces_to_remove;
 	for (Cgal_face_descriptor fd : faces(mesh)) {
 		if (component_map[fd] != largest_component_id) {
 			faces_to_remove.push_back(fd);
@@ -1129,7 +1290,7 @@ void clean_difference(Cgal_Mesh& mesh, bool DEBUG) {
 
 int close_mesh_hole(Cgal_Mesh& mesh, bool DEBUG) {
 	int holes_closed = 0;
-	std::vector<Cgal_Halfedge> border_halfedges;
+	vector<Cgal_Halfedge> border_halfedges;
 	for (Cgal_Halfedge h : mesh.halfedges()) {
 		if (mesh.is_border(h)) {
 			border_halfedges.push_back(h);
@@ -1137,19 +1298,19 @@ int close_mesh_hole(Cgal_Mesh& mesh, bool DEBUG) {
 	}
 
 	for (Cgal_Halfedge h : border_halfedges) {
-		std::vector<Cgal_Face> patch_facets;
-		std::vector<Cgal_Vertex> patch_vertices;
+		vector<Cgal_Face> patch_facets;
+		vector<Cgal_Vertex> patch_vertices;
 
-		bool success = std::get<0>(PMP::triangulate_refine_and_fair_hole(mesh,
+		bool success = get<0>(PMP::triangulate_refine_and_fair_hole(mesh,
 			h,
-			CGAL::parameters::face_output_iterator(std::back_inserter(patch_facets))
-			.vertex_output_iterator(std::back_inserter(patch_vertices))));
+			CGAL::parameters::face_output_iterator(back_inserter(patch_facets))
+			.vertex_output_iterator(back_inserter(patch_vertices))));
 
 		if (success) {
 			holes_closed++;
 		}
 		else {
-			std::cerr << Red << "        Failed to close mesh holes." << ColorEnd << std::endl;
+			cerr << RED << "        Failed to close mesh holes." << END << endl;
 		}
 	}
 	return holes_closed;
@@ -1160,46 +1321,46 @@ bool repair_and_validate_mesh(Cgal_Mesh& mesh, bool DEBUG) {
 	Cgal_Mesh temp = mesh;
 	mesh.clear();
 
-	std::size_t Mesh_stitches = PMP::stitch_borders(temp);
-	if (DEBUG) std::cout << Yellow << "        Mesh stitches: "
-		<< ColorEnd << Mesh_stitches << std::endl;
+	size_t Mesh_stitches = PMP::stitch_borders(temp);
+	if (DEBUG) cout << YELLOW << "        Mesh stitches: "
+		<< END << Mesh_stitches << endl;
 
-	std::vector<Cgal_Face> degenerate_faces;
-	PMP::degenerate_faces(temp, std::back_inserter(degenerate_faces));
+	vector<Cgal_Face> degenerate_faces;
+	PMP::degenerate_faces(temp, back_inserter(degenerate_faces));
 	PMP::remove_degenerate_faces(degenerate_faces, temp);
-	if (DEBUG) std::cout << Yellow << "        Removed degenerate faces: " << ColorEnd << degenerate_faces.size() << std::endl;
+	if (DEBUG) cout << YELLOW << "        Removed degenerate faces: " << END << degenerate_faces.size() << endl;
 
-	std::size_t Mesh_New_vertices = PMP::duplicate_non_manifold_vertices(temp);
-	if (DEBUG) std::cout << Yellow << "        Mesh new vertices: "
-		<< ColorEnd << Mesh_New_vertices << std::endl;
+	size_t Mesh_New_vertices = PMP::duplicate_non_manifold_vertices(temp);
+	if (DEBUG) cout << YELLOW << "        Mesh new vertices: "
+		<< END << Mesh_New_vertices << endl;
 
-	std::size_t Mesh_removed_vertices = PMP::remove_isolated_vertices(temp);
-	if (DEBUG) std::cout << Yellow << "        Mesh removed vertices: "
-		<< ColorEnd << Mesh_removed_vertices << std::endl;
+	size_t Mesh_removed_vertices = PMP::remove_isolated_vertices(temp);
+	if (DEBUG) cout << YELLOW << "        Mesh removed vertices: "
+		<< END << Mesh_removed_vertices << endl;
 
-	std::size_t removed_components = PMP::remove_connected_components_of_negligible_size(mesh);
-	if (DEBUG) std::cout << Yellow << "        Removed small connected components: " << ColorEnd << removed_components << std::endl;
+	size_t removed_components = PMP::remove_connected_components_of_negligible_size(mesh);
+	if (DEBUG) cout << YELLOW << "        Removed small connected components: " << END << removed_components << endl;
 
 	PMP::orient(temp);
 
 	if (!PMP::is_outward_oriented(temp)) {
-		if (DEBUG) std::cout << Yellow << "        The mesh is not outward oriented." << ColorEnd << std::endl;
+		if (DEBUG) cout << YELLOW << "        The mesh is not outward oriented." << END << endl;
 		PMP::reverse_face_orientations(temp); // Reverse the face orientations
-		if (DEBUG) std::cout << Green << "        Orientation corrected." << ColorEnd << std::endl;
+		if (DEBUG) cout << GREEN << "        Orientation corrected." << END << endl;
 	}
 
 	temp.collect_garbage();
 
 	if (!CGAL::is_closed(temp))
-		std::cerr << Red << "        Error: The mesh is not closed." << ColorEnd << std::endl;
+		cerr << RED << "        Error: The mesh is not closed." << END << endl;
 
-	std::stringstream buffer;
-	std::streambuf* prevcerr = std::cerr.rdbuf(buffer.rdbuf());
+	stringstream buffer;
+	streambuf* prevcerr = cerr.rdbuf(buffer.rdbuf());
 	isValid = CGAL::is_valid_polygon_mesh(temp, DEBUG);
-	std::cerr.rdbuf(prevcerr);
-	std::string line;
-	while (std::getline(buffer, line)) {
-		if (DEBUG) std::cout << Yellow << "        Validation output: " << ColorEnd << line << ColorEnd << std::endl;
+	cerr.rdbuf(prevcerr);
+	string line;
+	while (getline(buffer, line)) {
+		if (DEBUG) cout << YELLOW << "        Validation output: " << END << line << END << endl;
 	}
 
 	mesh = temp;
@@ -1208,7 +1369,7 @@ bool repair_and_validate_mesh(Cgal_Mesh& mesh, bool DEBUG) {
 
 bool prepare_mesh(Cgal_Mesh& mesh) {
 	if (!CGAL::is_triangle_mesh(mesh)) {
-		std::cerr << "        Input mesh is not a triangle mesh." << std::endl;
+		cerr << "        Input mesh is not a triangle mesh." << endl;
 	}
 	assert(CGAL::is_valid_polygon_mesh(mesh));
 	PMP::triangulate_faces(mesh);
@@ -1228,50 +1389,50 @@ bool prepare_mesh(Cgal_Mesh& mesh) {
 
 	//// close mesh
 	//// fill hole
-	//std::vector<Halfedge> border_cycles;
-	//PMP::extract_boundary_cycles(mesh, std::back_inserter(border_cycles));
+	//vector<Halfedge> border_cycles;
+	//PMP::extract_boundary_cycles(mesh, back_inserter(border_cycles));
 	//for (Halfedge h : border_cycles) {
-	//	std::vector<Face> patch_facets;
+	//	vector<Face> patch_facets;
 	//	PMP::triangulate_hole(
 	//		mesh,
 	//		h,
-	//		std::back_inserter(patch_facets));
+	//		back_inserter(patch_facets));
 	//}
 
 	if (CGAL::is_closed(mesh)) printf("        Mesh: is closed\n");
 	else {
-		std::cerr << "        Input mesh is not closed. Attempting to close the mesh." << std::endl;
+		cerr << "        Input mesh is not closed. Attempting to close the mesh." << endl;
 		PMP::stitch_borders(mesh);
 	}
 	if (PMP::does_self_intersect(mesh)) printf("        Mesh: is self_intersect\n");
 
 	//PMP::fair(mesh);
-	std::cout << "        Smoothing the mesh..." << std::endl;
-	std::set<Cgal_Mesh::Vertex_index> constrained_vertices;
+	cout << "        Smoothing the mesh..." << endl;
+	set<Cgal_Mesh::Vertex_index> constrained_vertices;
 	for (Cgal_Mesh::Vertex_index v : vertices(mesh)) {
 		if (is_border(v, mesh))
 			constrained_vertices.insert(v);
 	}
 
-	CGAL::Boolean_property_map<std::set<Cgal_Mesh::Vertex_index>> vcmap(constrained_vertices);
+	CGAL::Boolean_property_map<set<Cgal_Mesh::Vertex_index>> vcmap(constrained_vertices);
 	PMP::smooth_shape(mesh, 0.0001, CGAL::parameters::number_of_iterations(10).vertex_is_constrained_map(vcmap));
 
 	return true;
 }
 
 double get_height(Cgal_Mesh mesh) {
-	std::vector<Cgal_Point> points;
+	vector<Cgal_Point> points;
 	for (auto v : mesh.vertices()) {
 		points.push_back(mesh.point(v));
 	}
 	Cgal_cuboid bbox = CGAL::bounding_box(points.begin(), points.end());
 	double modelHeight = bbox.zmax() - bbox.zmin();
-	if (DEBUG) std::cout << Yellow << "        Mesh Height:  H " << ColorEnd << modelHeight << std::endl;
+	if (DEBUG) cout << YELLOW << "        Mesh Height:  H " << END << modelHeight << endl;
 	return modelHeight;
 }
 
 void get_mesh_dimensions(Cgal_Mesh mesh, double& modelWidth, double& modelLength, double& modelHeight, bool DEBUG) {
-	std::vector<Cgal_Point> points;
+	vector<Cgal_Point> points;
 	for (auto v : mesh.vertices()) {
 		points.push_back(mesh.point(v));
 	}
@@ -1279,10 +1440,10 @@ void get_mesh_dimensions(Cgal_Mesh mesh, double& modelWidth, double& modelLength
 	modelWidth = bbox.xmax() - bbox.xmin();
 	modelLength = bbox.ymax() - bbox.ymin();
 	modelHeight = bbox.zmax() - bbox.zmin();
-	if (DEBUG) std::cout << Yellow << "        Mesh Dimensions:  W " << ColorEnd
+	if (DEBUG) cout << YELLOW << "        Mesh Dimensions:  W " << END
 		<< modelWidth << "   L "
 		<< modelLength << "   H "
-		<< modelHeight << std::endl;
+		<< modelHeight << endl;
 }
 
 void get_mesh_center(Cgal_Mesh mesh, Cgal_Point& center, bool DEBUG) {
@@ -1291,26 +1452,26 @@ void get_mesh_center(Cgal_Mesh mesh, Cgal_Point& center, bool DEBUG) {
 		bbox += mesh.point(v).bbox();
 	}
 	center = Cgal_Point((bbox.xmin() + bbox.xmax()) / 2.0, (bbox.ymin() + bbox.ymax()) / 2.0, (bbox.zmin() + bbox.zmax()) / 2.0);
-	if (DEBUG) std::cout << Yellow << "        Mesh Center:  " << ColorEnd
+	if (DEBUG) cout << YELLOW << "        Mesh Center:  " << END
 		<< center.x() << "  "
 		<< center.y() << "  "
-		<< center.z() << std::endl;
+		<< center.z() << endl;
 }
 
 void get_mesh_centroid(Cgal_Mesh mesh, Cgal_Point& centroid, bool DEBUG) {
-	std::vector<Cgal_Point> vertices;
+	vector<Cgal_Point> vertices;
 	for (auto v : mesh.vertices()) {
 		vertices.push_back(mesh.point(v));
 	}
 	centroid = CGAL::centroid(vertices.begin(), vertices.end());
-	if (DEBUG) std::cout << Yellow << "        Mesh Centroid:  " << ColorEnd
+	if (DEBUG) cout << YELLOW << "        Mesh Centroid:  " << END
 		<< centroid.x() << "  "
 		<< centroid.y() << "  "
-		<< centroid.z() << std::endl;
+		<< centroid.z() << endl;
 }
 
 void settle_mesh(Cgal_Mesh& mesh, bool DEBUG) {
-	double min_z = std::numeric_limits<double>::infinity();
+	double min_z = numeric_limits<double>::infinity();
 	for (auto v : mesh.vertices()) {
 		double z = mesh.point(v).z();
 		if (z < min_z) min_z = z;
@@ -1320,14 +1481,14 @@ void settle_mesh(Cgal_Mesh& mesh, bool DEBUG) {
 		Cgal_Point p = mesh.point(v) + translation_vector;
 		mesh.point(v) = p;
 	}
-	if (DEBUG) std::cout << Yellow << "        Mesh Settled at Z:  " << ColorEnd << -min_z << std::endl;
+	if (DEBUG) cout << YELLOW << "        Mesh Settled at Z:  " << END << -min_z << endl;
 }
 
 void cut_mesh(Cgal_Mesh& mesh, double height, bool DEBUG) {
 	if (height <= -0.0001) {
 		Cgal_Plane plane(0, 0, -1, -height); // Adjust 'distance' as needed
 		if (PMP::clip(mesh, plane, PMP::parameters::clip_volume(true))) {
-			double min_z = std::numeric_limits<double>::infinity();
+			double min_z = numeric_limits<double>::infinity();
 			for (auto v : mesh.vertices()) {
 				double z = mesh.point(v).z();
 				if (z < min_z) min_z = z;
@@ -1337,12 +1498,12 @@ void cut_mesh(Cgal_Mesh& mesh, double height, bool DEBUG) {
 				Cgal_Point p = mesh.point(v) - translation_vector;
 				mesh.point(v) = p;
 			}
-			if (DEBUG) std::cout << Yellow << "        Mesh Cut at Z:  " << ColorEnd << height << "  , Settled at Z: " << min_z << std::endl;
+			if (DEBUG) cout << YELLOW << "        Mesh Cut at Z:  " << END << height << "  , Settled at Z: " << min_z << endl;
 		}
 		else {
-			std::cerr << Red << "        Cutting mesh failed." << ColorEnd << std::endl;
-			if (DEBUG) std::cout << Yellow << "        Trying another Cutting way..." << ColorEnd << std::endl;
-		
+			cerr << RED << "        Cutting mesh failed." << END << endl;
+			if (DEBUG) cout << YELLOW << "        Trying another Cutting way..." << END << endl;
+
 			double size = 100.0, bottom_z = -20;
 			Cgal_Mesh clipper, Result_Mesh;
 			Cgal_Vertex v0 = clipper.add_vertex(Cgal_Point(-size, -size, -height));
@@ -1359,9 +1520,11 @@ void cut_mesh(Cgal_Mesh& mesh, double height, bool DEBUG) {
 			clipper.add_face(v1, v5, v2); clipper.add_face(v2, v5, v6);
 			clipper.add_face(v2, v6, v3); clipper.add_face(v3, v6, v7);
 			clipper.add_face(v3, v7, v0); clipper.add_face(v0, v7, v4);
-		
+
+			PMP::stitch_borders(clipper);
+
 			if (PMP::corefine_and_compute_difference(mesh, clipper, Result_Mesh)) {
-				double min_z = std::numeric_limits<double>::infinity();
+				double min_z = numeric_limits<double>::infinity();
 				for (auto v : mesh.vertices()) {
 					double z = mesh.point(v).z();
 					if (z < min_z) min_z = z;
@@ -1371,12 +1534,12 @@ void cut_mesh(Cgal_Mesh& mesh, double height, bool DEBUG) {
 					Cgal_Point p = mesh.point(v) - translation_vector;
 					mesh.point(v) = p;
 				}
-				if (DEBUG) std::cout << Yellow << "        Mesh Cut at Z:  " << ColorEnd << height << "  , Settled at Z: " << min_z << std::endl;
+				if (DEBUG) cout << YELLOW << "        Mesh Cut at Z:  " << END << height << "  , Settled at Z: " << min_z << endl;
 				mesh.clear();
 				mesh = Result_Mesh;
 			}
 			else {
-				std::cerr << Red << "        Cutting mesh failed." << ColorEnd << std::endl;
+				cerr << RED << "        Cutting mesh failed." << END << endl;
 			}
 		}
 	}
@@ -1389,7 +1552,7 @@ void extrude_mesh(Cgal_Mesh& mesh, double target_z, bool DEBUG) {
 			Cgal_Point& p = mesh.point(v);
 			if (p.z() >= min_z) mesh.point(v) = Cgal_Point(p.x(), p.y(), p.z() + target_z);
 		}
-		if (DEBUG) std::cout << Yellow << "        Mesh Extruded:  " << ColorEnd << target_z << std::endl;
+		if (DEBUG) cout << YELLOW << "        Mesh Extruded:  " << END << target_z << endl;
 		settle_mesh(mesh, DEBUG);
 	}
 }
@@ -1416,38 +1579,38 @@ void translate_mesh(Cgal_Mesh& mesh, double Vx, double Vy, double Vz, bool DEBUG
 	for (auto v : mesh.vertices()) {
 		mesh.point(v) = translation(mesh.point(v));
 	}
-	if (DEBUG) std::cout << Yellow << "        translation Applied:  " << ColorEnd << Cgal_Vector(Vx, Vy, Vz) << std::endl;
+	if (DEBUG) cout << YELLOW << "        translation Applied:  " << END << Cgal_Vector(Vx, Vy, Vz) << endl;
 }
 
 void rotate_mesh(Cgal_Mesh& mesh, double x_deg, double y_deg, double z_deg, bool DEBUG) {
 	if (z_deg < -0.001 || z_deg > 0.001) {
-		double cos_x = std::cos(x_deg * M_PI / 180.0), sin_x = std::sin(x_deg * M_PI / 180.0);
-		double cos_y = std::cos(y_deg * M_PI / 180.0), sin_y = std::sin(y_deg * M_PI / 180.0);
-		double cos_z = std::cos(z_deg * M_PI / 180.0), sin_z = std::sin(z_deg * M_PI / 180.0);
+		double cos_x = cos(x_deg * M_PI / 180.0), sin_x = sin(x_deg * M_PI / 180.0);
+		double cos_y = cos(y_deg * M_PI / 180.0), sin_y = sin(y_deg * M_PI / 180.0);
+		double cos_z = cos(z_deg * M_PI / 180.0), sin_z = sin(z_deg * M_PI / 180.0);
 
 		Cgal_Transformation rot_mtx_x(1, 0, 0, 0, 0, cos_x, -sin_x, 0, 0, sin_x, cos_x, 0, 1);
 		Cgal_Transformation rot_mtx_y(cos_y, 0, sin_y, 0, 0, 1, 0, 0, -sin_y, 0, cos_y, 0, 1);
 		Cgal_Transformation rot_mtx_z(cos_z, -sin_z, 0, 0, sin_z, cos_z, 0, 0, 0, 0, 1, 0, 1);
 		Cgal_Transformation combined = rot_mtx_z * rot_mtx_y * rot_mtx_x;
 		PMP::transform(combined, mesh);
-		if (DEBUG) std::cout << Yellow << "        Rotation Applied:  "
-			<< ColorEnd << "X " << x_deg << ", Y " << y_deg << ", Z " << z_deg << std::endl;
+		if (DEBUG) cout << YELLOW << "        Rotation Applied:  "
+			<< END << "X " << x_deg << ", Y " << y_deg << ", Z " << z_deg << endl;
 	}
 }
 
-void translate_pts(std::vector<Cgal_Point>& points, double Vx, double Vy, double Vz, bool DEBUG) {
+void translate_pts(vector<Cgal_Point>& points, double Vx, double Vy, double Vz, bool DEBUG) {
 	Cgal_Transformation translation(CGAL::TRANSLATION, Cgal_Vector(Vx, Vy, Vz));
 	for (auto& point : points) {
 		point = translation(point);
 	}
-	if (DEBUG) std::cout << Yellow << "        PTS translation Applied:  " << ColorEnd << Cgal_Vector(Vx, Vy, Vz) << std::endl;
+	if (DEBUG) cout << YELLOW << "        PTS translation Applied:  " << END << Cgal_Vector(Vx, Vy, Vz) << endl;
 }
 
-void rotate_pts(std::vector<Cgal_Point>& points, double x_deg, double y_deg, double z_deg, bool DEBUG) {
+void rotate_pts(vector<Cgal_Point>& points, double x_deg, double y_deg, double z_deg, bool DEBUG) {
 	if (z_deg < -0.001 || z_deg > 0.001) {
-		double cos_x = std::cos(x_deg * M_PI / 180.0), sin_x = std::sin(x_deg * M_PI / 180.0);
-		double cos_y = std::cos(y_deg * M_PI / 180.0), sin_y = std::sin(y_deg * M_PI / 180.0);
-		double cos_z = std::cos(z_deg * M_PI / 180.0), sin_z = std::sin(z_deg * M_PI / 180.0);
+		double cos_x = cos(x_deg * M_PI / 180.0), sin_x = sin(x_deg * M_PI / 180.0);
+		double cos_y = cos(y_deg * M_PI / 180.0), sin_y = sin(y_deg * M_PI / 180.0);
+		double cos_z = cos(z_deg * M_PI / 180.0), sin_z = sin(z_deg * M_PI / 180.0);
 
 		Cgal_Transformation rot_mtx_x(1, 0, 0, 0, 0, cos_x, -sin_x, 0, 0, sin_x, cos_x, 0, 1);
 		Cgal_Transformation rot_mtx_y(cos_y, 0, sin_y, 0, 0, 1, 0, 0, -sin_y, 0, cos_y, 0, 1);
@@ -1456,85 +1619,85 @@ void rotate_pts(std::vector<Cgal_Point>& points, double x_deg, double y_deg, dou
 		for (auto& point : points) {
 			point = combined(point);
 		}
-		if (DEBUG) std::cout << Yellow << "        PTS Rotation Applied:  "
-			<< ColorEnd << "X " << x_deg << ", Y " << y_deg << ", Z " << z_deg << std::endl;
+		if (DEBUG) cout << YELLOW << "        PTS Rotation Applied:  "
+			<< END << "X " << x_deg << ", Y " << y_deg << ", Z " << z_deg << endl;
 	}
 }
 
-bool read_STL_data(std::string identifier, Cgal_Mesh& mesh, bool DEBUG) {
-	auto start_ = std::chrono::high_resolution_clock::now();
+bool read_STL_data(string identifier, Cgal_Mesh& mesh, bool DEBUG) {
+	auto start_ = chrono::high_resolution_clock::now();
 	mesh.clear();
 	for (const auto& data : FONT_STL) {
 		if (data.key == identifier) {
-			std::istringstream iss(std::string(reinterpret_cast<const char*>(data.data), data.size), std::ios::binary);
+			istringstream iss(string(reinterpret_cast<const char*>(data.data), data.size), ios::binary);
 			if (CGAL::IO::read_STL(iss, mesh)) {
-				auto finish_ = std::chrono::high_resolution_clock::now();
-				std::chrono::duration<double> elapsed_ = finish_ - start_;
-				if (DEBUG) std::cout << "     >> " << Yellow << "Read Mesh: " << ColorEnd << identifier
-					<< Cyan << "   ET: " << elapsed_.count() << " Sec" << ColorEnd << std::endl;
+				auto finish_ = chrono::high_resolution_clock::now();
+				chrono::duration<double> elapsed_ = finish_ - start_;
+				if (DEBUG) cout << "     >> " << YELLOW << "Read Mesh: " << END << identifier
+					<< CYAN << "   ET: " << elapsed_.count() << " Sec" << END << endl;
 				return true;
 			}
 			break;
 		}
 	}
-	std::cerr << Red << "        Error: No STL data available for:  " << ColorEnd << identifier << std::endl;
+	cerr << RED << "        Error: No STL data available for:  " << END << identifier << endl;
 	return false;
 }
 
-bool read_STL_Cgal(std::string filename, Cgal_Mesh& mesh, bool DEBUG) {
-	auto start_ = std::chrono::high_resolution_clock::now();
+bool read_STL_Cgal(string filename, Cgal_Mesh& mesh, bool DEBUG) {
+	auto start_ = chrono::high_resolution_clock::now();
 	mesh.clear();
-	fs::path filepath(filename);
+	path filepath(filename);
 	////if (!CGAL::IO::read_STL(filename, mesh)) {
 	//if (!PMP::IO::read_polygon_mesh(filename, mesh)) {
-	//	std::cerr << Red << "        Error: Cannot read the STL file:  " << ColorEnd << filepath.filename().string() << std::endl;
+	//	cerr << RED << "        Error: Cannot read the STL file:  " << END << filepath.filename().string() << endl;
 	//	return false;
 	//}
 
-	std::vector<Cgal_Point> points;
-	std::vector<std::vector<std::size_t>> polygons;
+	vector<Cgal_Point> points;
+	vector<vector<size_t>> polygons;
 	if (!CGAL::IO::read_polygon_soup(filename, points, polygons)) return false;
 	PMP::repair_polygon_soup(points, polygons);
 	PMP::orient_polygon_soup(points, polygons);
 	PMP::polygon_soup_to_polygon_mesh(points, polygons, mesh);
 
-	auto finish_ = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double> elapsed_ = finish_ - start_;
-	if (DEBUG) std::cout << "     >> " << Yellow << "Read STL File: " << ColorEnd << filepath.filename().string()
-		<< Cyan << "   ET: " << elapsed_.count() << " Sec" << ColorEnd << std::endl;
+	auto finish_ = chrono::high_resolution_clock::now();
+	chrono::duration<double> elapsed_ = finish_ - start_;
+	if (DEBUG) cout << "     >> " << YELLOW << "Read STL File: " << END << filepath.filename().string()
+		<< CYAN << "   ET: " << elapsed_.count() << " Sec" << END << endl;
 	return true;
 }
 
-bool write_STL_Cgal(std::string filename, Cgal_Mesh mesh, bool DEBUG) {
-	auto start_ = std::chrono::high_resolution_clock::now();
-	fs::path filepath(filename);
+bool write_STL_Cgal(string filename, Cgal_Mesh mesh, bool DEBUG) {
+	auto start_ = chrono::high_resolution_clock::now();
+	path filepath(filename);
 	//if (!CGAL::IO::write_polygon_mesh(filename, mesh, CGAL::parameters::stream_precision(10))) {
 	if (!CGAL::IO::write_polygon_mesh(filename, mesh)) {
-		std::cerr << Red << "        Error: Cannot write the STL file:  " << ColorEnd << filepath.filename().string() << std::endl;
+		cerr << RED << "        Error: Cannot write the STL file:  " << END << filepath.filename().string() << endl;
 		return false;
 	}
-	auto finish_ = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double> elapsed_ = finish_ - start_;
-	if (DEBUG) std::cout << "     << " << Yellow << "Written STL File: " << ColorEnd << filepath.filename().string()
-		<< Cyan << "   ET: " << elapsed_.count() << " Sec" << ColorEnd << std::endl;
+	auto finish_ = chrono::high_resolution_clock::now();
+	chrono::duration<double> elapsed_ = finish_ - start_;
+	if (DEBUG) cout << "     << " << YELLOW << "Written STL File: " << END << filepath.filename().string()
+		<< CYAN << "   ET: " << elapsed_.count() << " Sec" << END << endl;
 	return true;
 }
 
 void remesh_mesh(Cgal_Mesh& mesh, double target_edge_length, unsigned int number_of_iterations, bool DEBUG) {
-	auto start_ = std::chrono::high_resolution_clock::now();
-	if (DEBUG) std::cout << Yellow << "        Creating a remesh" << ColorEnd << std::endl;
+	auto start_ = chrono::high_resolution_clock::now();
+	if (DEBUG) cout << YELLOW << "        Creating a remesh" << END << endl;
 	PMP::triangulate_faces(mesh);
-	if (DEBUG) std::cout << Yellow << "        Triangulate faces" << ColorEnd << std::endl;
+	if (DEBUG) cout << YELLOW << "        Triangulate faces" << END << endl;
 	PMP::remove_degenerate_faces(mesh);
-	if (DEBUG) std::cout << Yellow << "        Remove degenerate faces" << ColorEnd << std::endl;
+	if (DEBUG) cout << YELLOW << "        Remove degenerate faces" << END << endl;
 	PMP::stitch_borders(mesh);
-	if (DEBUG) std::cout << Yellow << "        Stitch borders" << ColorEnd << std::endl;
+	if (DEBUG) cout << YELLOW << "        Stitch borders" << END << endl;
 
-	std::vector<std::pair<Cgal_face_descriptor, Cgal_face_descriptor>> self_intersections;
-	PMP::self_intersections(mesh, std::back_inserter(self_intersections));
+	vector<pair<Cgal_face_descriptor, Cgal_face_descriptor>> self_intersections;
+	PMP::self_intersections(mesh, back_inserter(self_intersections));
 	if (!self_intersections.empty()) {
 		PMP::experimental::autorefine_and_remove_self_intersections(mesh);
-		if (DEBUG) std::cout << Yellow << "        Autorefine and remove self intersections" << ColorEnd << std::endl;
+		if (DEBUG) cout << YELLOW << "        Autorefine and remove self intersections" << END << endl;
 	}
 
 #pragma warning(push)
@@ -1542,9 +1705,9 @@ void remesh_mesh(Cgal_Mesh& mesh, double target_edge_length, unsigned int number
 	bool print = false;
 	for (auto h : mesh.halfedges()) {
 		if (mesh.is_border(h)) {
-			std::vector<Cgal_face_descriptor> patch;
-			PMP::triangulate_hole(mesh, h, std::back_inserter(patch));
-			if (DEBUG && !print) std::cout << Yellow << "        Triangulate hole" << ColorEnd << std::endl;
+			vector<Cgal_face_descriptor> patch;
+			PMP::triangulate_hole(mesh, h, back_inserter(patch));
+			if (DEBUG && !print) cout << YELLOW << "        Triangulate hole" << END << endl;
 			print = true;
 		}
 	}
@@ -1555,13 +1718,13 @@ void remesh_mesh(Cgal_Mesh& mesh, double target_edge_length, unsigned int number
 	//	mesh,
 	//	PMP::parameters::number_of_iterations(number_of_iterations));
 
-	auto finish_ = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double> elapsed_ = finish_ - start_;
-	if (DEBUG) std::cout << "        " << Yellow << "Remesh done " << ColorEnd
-		<< Cyan << "   ET: " << elapsed_.count() << " Sec" << ColorEnd << std::endl;
+	auto finish_ = chrono::high_resolution_clock::now();
+	chrono::duration<double> elapsed_ = finish_ - start_;
+	if (DEBUG) cout << "        " << YELLOW << "Remesh done " << END
+		<< CYAN << "   ET: " << elapsed_.count() << " Sec" << END << endl;
 }
 
-void create_fixture(std::string ID_Str, Cgal_Mesh Fix_Mesh, Cgal_Mesh& Res_Mesh, bool DEBUG) {
+void create_fixture(string ID_Str, Cgal_Mesh Fix_Mesh, Cgal_Mesh& Res_Mesh, bool DEBUG) {
 	bool lastWasDigit = false;
 	double offsetX = -6.5, offsetY = -7.5, offsetZ = 4.0;
 	double XYscale = 0.18, XYtopscale = 0.18, Zscale = 0.30;
@@ -1570,18 +1733,18 @@ void create_fixture(std::string ID_Str, Cgal_Mesh Fix_Mesh, Cgal_Mesh& Res_Mesh,
 	double zDepth = -0.7;
 	Cgal_Mesh Tag_Mesh;
 
-	if (DEBUG) std::cout << Yellow << "        Creating tag on Fixture:  " << ColorEnd << ID_Str << std::endl;
+	if (DEBUG) cout << YELLOW << "        Creating tag on Fixture:  " << END << ID_Str << endl;
 
-	std::transform(ID_Str.begin(), ID_Str.end(), ID_Str.begin(), [](unsigned char c) { return std::toupper(c); });
+	transform(ID_Str.begin(), ID_Str.end(), ID_Str.begin(), [](unsigned char c) { return toupper(c); });
 	for (char c : ID_Str) {
 		Cgal_Mesh Letter_Mesh;
 		double FontWidth = 0.0, FontLength = 0.0, FontHeight = 0.0;
 
-		if (!read_STL_data(std::string(1, c), Letter_Mesh, false)) continue;
+		if (!read_STL_data(string(1, c), Letter_Mesh, false)) continue;
 
 		get_mesh_dimensions(Letter_Mesh, FontWidth, FontLength, FontHeight, false);
 
-		if (std::isdigit(c)) lastWasDigit = true;
+		if (isdigit(c)) lastWasDigit = true;
 		else if (lastWasDigit) {
 			offsetY -= (FontLength * XYscale) + Yspacing;
 			offsetX = -6.35; // 0.15
@@ -1596,22 +1759,22 @@ void create_fixture(std::string ID_Str, Cgal_Mesh Fix_Mesh, Cgal_Mesh& Res_Mesh,
 
 	Res_Mesh.clear();
 	if (!PMP::corefine_and_compute_difference(Fix_Mesh, Tag_Mesh, Res_Mesh))
-		std::cerr << Red << "        Tag Subtraction failed for: " << ColorEnd << ID_Str << std::endl;
+		cerr << RED << "        Tag Subtraction failed for: " << END << ID_Str << endl;
 }
 
 
-bool modify_model_mesh(Cgal_Mesh F_Mesh, std::string I_Path, std::string O_Path, const std::string ID_,
+bool modify_model_mesh(Cgal_Mesh F_Mesh, string I_Path, string O_Path, const string ID_,
 	double M_Xoffset, double M_Yoffset, double C_height, double M_Zrot, bool DEBUG) {
-	auto start_ = std::chrono::high_resolution_clock::now();
+	auto start_ = chrono::high_resolution_clock::now();
 
 	Cgal_Mesh M_Mesh, F_ID_Mesh, Result_Mesh;
-	if (DEBUG) std::cout << "      > " << Yellow << "Applied Offsets: " << ColorEnd
-		<< "X" << M_Xoffset << "  Y" << M_Yoffset << "  CH" << C_height << "  R" << M_Zrot << std::endl;
+	if (DEBUG) cout << "      > " << YELLOW << "Applied Offsets: " << END
+		<< "X" << M_Xoffset << "  Y" << M_Yoffset << "  CH" << C_height << "  R" << M_Zrot << endl;
 
 	read_STL_Cgal(I_Path, M_Mesh, DEBUG);
 
 	remesh_mesh(M_Mesh, 0.3, 3, DEBUG);
-	
+
 	create_fixture(ID_, F_Mesh, F_ID_Mesh, DEBUG);
 
 	rotate_mesh(M_Mesh, 0, 0, M_Zrot, DEBUG);
@@ -1625,10 +1788,10 @@ bool modify_model_mesh(Cgal_Mesh F_Mesh, std::string I_Path, std::string O_Path,
 
 	//CGAL::copy_face_graph(F_ID_Mesh, Result_Mesh);
 	//CGAL::copy_face_graph(M_Mesh, Result_Mesh);
-	//if (DEBUG) std::cout << Yellow << "        Fixture added to: " << ColorEnd << ID_ << std::endl;
+	//if (DEBUG) cout << YELLOW << "        Fixture added to: " << END << ID_ << endl;
 
 	PMP::corefine_and_compute_union(M_Mesh, F_ID_Mesh, Result_Mesh);
-	if (DEBUG) std::cout << Yellow << "        Fixture added to: " << ColorEnd << ID_ << std::endl;
+	if (DEBUG) cout << YELLOW << "        Fixture added to: " << END << ID_ << endl;
 
 
 	//prepare_mesh(Result_Mesh);
@@ -1637,38 +1800,39 @@ bool modify_model_mesh(Cgal_Mesh F_Mesh, std::string I_Path, std::string O_Path,
 
 	if (!write_STL_Cgal(O_Path, Result_Mesh, DEBUG)) return false;
 
-	auto finish_ = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double> elapsed_ = finish_ - start_;
-	std::cout << "   >><< " << Green << "Operation completed successfully." << ColorEnd
-		<< Cyan << "   ET: " << elapsed_.count() << " Sec" << ColorEnd << std::endl;
-	std::cout << std::endl;
+	auto finish_ = chrono::high_resolution_clock::now();
+	chrono::duration<double> elapsed_ = finish_ - start_;
+	cout << "   >><< " << GREEN << "Operation completed successfully." << END
+		<< CYAN << "   ET: " << elapsed_.count() << " Sec" << END << endl;
+	cout << endl;
 	return true;
 }
 
-void process_files(std::vector<std::string> filenames, std::string filter, std::string inputPath,
-	std::string outputPath, bool DEBUG) {
+void process_files(vector<string> filenames, string filter, string inputPath,
+	string outputPath, bool DEBUG) {
 
-	std::cout << std::endl;
-	std::vector<std::string> filtered_files;
-	std::copy_if(filenames.begin(), filenames.end(), std::back_inserter(filtered_files),
-		[&filter](const std::string& name) {
-			return name.find(filter) != std::string::npos;
+	cout << endl;
+	vector<string> filtered_files;
+	copy_if(filenames.begin(), filenames.end(), back_inserter(filtered_files),
+		[&filter](const string& name) {
+			return name.find(filter) != string::npos;
 		});
-	std::sort(filtered_files.begin(), filtered_files.end());
+	sort(filtered_files.begin(), filtered_files.end());
 
 	Cgal_Mesh Fixture_Mesh;
 	read_STL_data("fixture", Fixture_Mesh, DEBUG);
 
 	Cgal_Point V_center;
 	double Model_Xoffset = 0.0, Model_Yoffset = 0.0, cut_height = 0.0, Model_Zrot = 0.0;
+	vector<array<double, 3>> PointsPositions;
 	bool started = false;
 	for (const auto& fileID : filtered_files) {
-		std::string Model_In_Path = inputPath + fileID + ".stl";
-		std::string Model_Out_Path = outputPath + fileID + ".stl";
+		string Model_In_Path = inputPath + fileID + ".stl";
+		string Model_Out_Path = outputPath + fileID + ".stl";
 
 		model_count++;
-		std::cout << (model_count < 10 ? "   0" : "   ") + std::to_string(model_count)
-			<< " > " << Yellow << "Modifying " << ColorEnd << fileID << std::endl;
+		cout << (model_count < 10 ? "   0" : "   ") + to_string(model_count)
+			<< " > " << YELLOW << "Modifying " << END << fileID << endl;
 
 		if (fileID == filtered_files[0]) {
 			Cgal_Mesh Visual_mesh;
@@ -1676,20 +1840,26 @@ void process_files(std::vector<std::string> filenames, std::string filter, std::
 			get_mesh_center(Visual_mesh, V_center, DEBUG);
 			translate_mesh(Visual_mesh, -V_center.x(), -V_center.y(), 0, DEBUG);
 			visualize_mesh(Visual_mesh, get_height(Visual_mesh), fileID, Fixture_Mesh,
-				Model_Xoffset, Model_Yoffset, cut_height, Model_Zrot, true);
+				Model_Xoffset, Model_Yoffset, cut_height, Model_Zrot, PointsPositions, true);
 		}
+
+		cout << "Spheres Positions:" << endl;
+		for (const auto& pos : PointsPositions) {
+			cout << "Position: [" << pos[0] << ", " << pos[1] << ", " << pos[2] << "]" << endl;
+		}
+
 		modify_model_mesh(Fixture_Mesh, Model_In_Path, Model_Out_Path, fileID,
 			Model_Xoffset, Model_Yoffset, cut_height, Model_Zrot, DEBUG);
 	}
 }
 
-void start_viewer_process(std::map<std::string, std::vector<std::string>> groupedFiles, std::vector<std::string> sortedKeys, std::string& inputPath, std::string& outputPath) {
+void start_viewer_process(map<string, vector<string>> groupedFiles, vector<string> sortedKeys, string& inputPath, string& outputPath) {
 	for (const auto& key : sortedKeys) {
-		std::cout << Green << "        Processing CaseID: " << ColorEnd << key << std::endl;
+		cout << GREEN << "        Processing CaseID: " << END << key << endl;
 		int Count = 0;
 		for (const auto& filename : groupedFiles[key]) {
 			Count++;
-			std::cout << (Count < 10 ? "   0" : "   ") + std::to_string(Count) << " > " << Cyan << filename << ColorEnd << std::endl;
+			cout << (Count < 10 ? "   0" : "   ") + to_string(Count) << " > " << CYAN << filename << END << endl;
 		}
 
 		// LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER
@@ -1703,92 +1873,80 @@ void start_viewer_process(std::map<std::string, std::vector<std::string>> groupe
 int main(int argc, char* argv[]) {
 	setConsoleSize(73, 35);
 
-	std::cout << Cyan << "\n===========================" << ColorEnd
-		<< Yellow << "'Created by Banna'" << ColorEnd
-		<< Cyan << "===========================" << ColorEnd << std::endl;
+	cout << CYAN << "\n===========================" << END
+		<< YELLOW << "'Created by Banna'" << END
+		<< CYAN << "===========================" << END << endl;
 
-	std::cout << Cyan << "======================" << ColorEnd
-		<< Yellow << "'AB FIXTURE CREATOR TOOL V3'" << ColorEnd
-		<< Cyan << "======================" << ColorEnd << std::endl;
-	std::cout << Cyan << "========================================================================\n" << ColorEnd << std::endl;
+	cout << CYAN << "======================" << END
+		<< YELLOW << "'AB Dental Tool'" << END
+		<< CYAN << "======================" << END << endl;
+	cout << CYAN << "========================================================================\n" << END << endl;
 
-	auto start = std::chrono::high_resolution_clock::now();
-	std::string Main_path = fs::current_path().string();
-	std::string outputPath = Main_path + "/output/";
-	std::string inputPath = Main_path + "/input/";
+	auto start = chrono::high_resolution_clock::now();
+	string Main_path = current_path().string();
+	string outputPath = Main_path + "/output/";
+	string inputPath = Main_path + "/input/";
 	bool has_stl_files = false;
-	std::vector<std::string> filenames;
+	vector<string> filenames;
 
-	if (!fs::exists(inputPath)) fs::create_directory(inputPath);
-	for (const auto& entry : fs::directory_iterator(inputPath)) {
+	if (!exists(inputPath)) create_directory(inputPath);
+	for (const auto& entry : directory_iterator(inputPath)) {
 		if (entry.path().extension() == ".stl") {
-			std::string filename_WE = entry.path().stem().string();
+			string filename_WE = entry.path().stem().string();
 			filenames.push_back(filename_WE);
 			has_stl_files = true;
 		}
 	}
 
 	if (!has_stl_files) {
-		std::cout << Red << "        No STL files in input folder\n" << ColorEnd << std::endl;
-		std::cout << "        Press enter to continue...";
-		std::cin.get();
+		cout << RED << "        No STL files in input folder\n" << END << endl;
+		cout << "        Press enter to continue...";
+		cin.get();
 		return EXIT_SUCCESS;
 	}
 
-	if (!fs::exists(outputPath))
-		fs::create_directory(outputPath);
-	else for (const auto& entry : fs::directory_iterator(outputPath))
-		fs::remove_all(entry.path());
+	if (!exists(outputPath))
+		create_directory(outputPath);
+	else for (const auto& entry : directory_iterator(outputPath))
+		remove_all(entry.path());
 
 
-	std::regex filenameRegex("([0-9]+)([a-zA-Z]+)([0-9]+)");
-	std::map<std::string, std::vector<std::string>> groupedFiles;
+	regex filenameRegex("([0-9]+)([a-zA-Z]+)([0-9]+)");
+	map<string, vector<string>> groupedFiles;
 
 	for (const auto& filename : filenames) {
-		std::smatch matches;
-		if (std::regex_match(filename, matches, filenameRegex) && matches.size() > 1) {
-			std::string groupKey = matches[1].str();  // First numeric sequence
+		smatch matches;
+		if (regex_match(filename, matches, filenameRegex) && matches.size() > 1) {
+			string groupKey = matches[1].str();  // First numeric sequence
 			groupedFiles[groupKey].push_back(filename);
 		}
 	}
 
 
-	std::vector<std::string> sortedKeys;
+	vector<string> sortedKeys;
 	for (const auto& pair : groupedFiles)
 		sortedKeys.push_back(pair.first);
-	//std::sort(sortedKeys.begin(), sortedKeys.end());
-	std::sort(sortedKeys.begin(), sortedKeys.end(), [](const std::string& a, const std::string& b) {
-		return std::stoi(a) < std::stoi(b);
+	//sort(sortedKeys.begin(), sortedKeys.end());
+	sort(sortedKeys.begin(), sortedKeys.end(), [](const string& a, const string& b) {
+		return stoi(a) < stoi(b);
 		});
 
 
 	start_viewer_process(groupedFiles, sortedKeys, inputPath, outputPath);
 
-	//for (const auto& key : sortedKeys) {
-	//	std::cout << Green << "        Processing CaseID: " << ColorEnd << key << std::endl;
-	//	int Count = 0;
-	//	for (const auto& filename : groupedFiles[key]) {
-	//		Count++;
-	//		std::cout << (Count < 10 ? "   0" : "   ") + std::to_string(Count) << " > " << Cyan << filename << ColorEnd << std::endl;
-	//	}
-	//
-	//	// LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER LOWER
-	//	process_files(groupedFiles[key], "L", inputPath, outputPath, DEBUG);
-	//	// UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER UPPER 
-	//	process_files(groupedFiles[key], "U", inputPath, outputPath, DEBUG);
-	//}
 
-	std::cout << std::endl;
+	cout << endl;
 	displayUserName();
 
-	auto finish = std::chrono::high_resolution_clock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(finish - start);
+	auto finish = chrono::high_resolution_clock::now();
+	auto elapsed = chrono::duration_cast<chrono::seconds>(finish - start);
 	int minutes = elapsed.count() / 60;
 	int seconds = elapsed.count() % 60;
-	std::cout << Yellow << "        Elapsed time: " << minutes << " Minutes " << seconds << " Seconds" << ColorEnd << std::endl;
+	cout << YELLOW << "        Elapsed time: " << minutes << " Minutes " << seconds << " Seconds" << END << endl;
 
-	std::cout << std::endl;
-	std::cout << "        Press enter to continue...";
-	std::cin.get();  // Waits for the user to press Enter
+	system("pause");
+	//cout << endl;
+	//cout << "        Press enter to continue...";
+	//cin.get();  // Waits for the user to press Enter
 	return EXIT_SUCCESS;
 }
